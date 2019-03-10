@@ -1,2 +1,2 @@
-# PowershellScripts
-Repository containing useful PowerShell scripts
+# Powershell Scripts
+Repository meant to contain useful PowerShell scripts.

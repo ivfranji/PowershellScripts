@@ -418,14 +418,10 @@ namespace Auth
     }
 
     $inputCsv = Import-Csv -Path $InputCsvFile;
-
-    if ($inputCsv.Count -lt 1)
+    if ($null -eq $inputCsv)
     {
-      if ($null -eq $inputCsv.EmailAddress)
-      {
-        throw "Input csv file empty.";
-      }
-    }
+      throw "Input csv file empty.";
+    }    
 
     Test-CsvFileHeader -ExpectedHeaders 'EmailAddress' -CsvFileEntry $inputCsv[0];
     [int]$counter = 0;

@@ -1,37 +1,37 @@
 function Start-MailFolderPermissionReport
 {
   <#
-    .SYNOPSIS
-    Function used to pull raw mailbox folder permission through the REST. Works only with Exchange Online.
+      .SYNOPSIS
+      Function used to pull raw mailbox folder permission through the REST. Works only with Exchange Online.
 
-    .DESCRIPTION
-    Pulling mailbox folder permission data through powershell 'Get-MailboxFolderPermission' is slow when it comes to
-    large scale data pulling as lot of hard work has been done by Exchange server to populate presentation object.
-    This function leverages REST api and high performant REST api library 'https://github.com/ivfranji/Exchange.RestServices'
-    to pull raw data from the folders. On average it takes ~200ms per mailbox to pull raw descriptors.
+      .DESCRIPTION
+      Pulling mailbox folder permission data through powershell 'Get-MailboxFolderPermission' is slow when it comes to
+      large scale data pulling as lot of hard work has been done by Exchange server to populate presentation object.
+      This function leverages REST api and high performant REST api library 'https://github.com/ivfranji/Exchange.RestServices'
+      to pull raw data from the folders. On average it takes ~200ms per mailbox to pull raw descriptors.
 
-    Prerequisites: 
+      Prerequisites: 
       1. https://www.nuget.org/packages/ExchangeRestServices/
       2. https://www.nuget.org/packages/Newtonsoft.Json/12.0.1
       3. https://www.nuget.org/packages/Microsoft.IdentityModel.Clients.ActiveDirectory/4.5.1
 
-    Please extract aforementioned libraries in one folder on your machine and run function from location of that folder.
+      Please extract aforementioned libraries in one folder on your machine and run function from location of that folder.
 
-    .PARAMETER CertificateThumbprint
-    Certificate thumbprint obtained by following these steps: https://github.com/ivfranji/Exchange.RestServices/wiki/RegisteringApp
+      .PARAMETER CertificateThumbprint
+      Certificate thumbprint obtained by following these steps: https://github.com/ivfranji/Exchange.RestServices/wiki/RegisteringApp
 
-    .PARAMETER ApplicationId
-    Application Id obtained by following these steps: https://github.com/ivfranji/Exchange.RestServices/wiki/RegisteringApp
+      .PARAMETER ApplicationId
+      Application Id obtained by following these steps: https://github.com/ivfranji/Exchange.RestServices/wiki/RegisteringApp
 
-    .PARAMETER TenantId
-    Tenant Id against which calls are being executed and which has application registered by following steps outlined in 'ApplicationId' parameter.
+      .PARAMETER TenantId
+      Tenant Id against which calls are being executed and which has application registered by following steps outlined in 'ApplicationId' parameter.
 
-    .PARAMETER InputCsvFile
-    This is csv file with list of email addresses for which permission should be pulled from. If list is large, please excersise 
-    performance of your machine with fewer set to make sure that it doesn't get overloaded.
+      .PARAMETER InputCsvFile
+      This is csv file with list of email addresses for which permission should be pulled from. If list is large, please excersise 
+      performance of your machine with fewer set to make sure that it doesn't get overloaded.
 
-    .PARAMETER NumberOfThreads
-    Number of concurrent threads to execute this call. Please excersise your machine's performance.
+      .PARAMETER NumberOfThreads
+      Number of concurrent threads to execute this call. Please excersise your machine's performance.
   #>
 
   [CmdletBinding()]
@@ -421,7 +421,10 @@ namespace Auth
 
     if ($inputCsv.Count -lt 1)
     {
-      throw "Input csv file empty.";
+      if ($null -eq $inputCsv.EmailAddress)
+      {
+        throw "Input csv file empty.";
+      }
     }
 
     Test-CsvFileHeader -ExpectedHeaders 'EmailAddress' -CsvFileEntry $inputCsv[0];
@@ -450,7 +453,7 @@ namespace Auth
     # using 'me' as this will be service call and destination will be set per folder request.
     $exchangeRestService = New-Object -TypeName 'Exchange.RestServices.ExchangeService' -ArgumentList @($authProvider, "me", [Exchange.RestServices.RestEnvironment]::OutlookBeta);
 
-    $runspaceJobs = @()
+    $runspaceJobs = @{}
     $runspaceSessionState = [System.Management.Automation.Runspaces.InitialSessionState]::CreateDefault();
     $runspacePool = [RunspaceFactory]::CreateRunspacePool(1, $NumberOfThreads, $runspaceSessionState, $Host);
     $runspacePool.ApartmentState = "STA";
@@ -477,19 +480,20 @@ namespace Auth
           WorkerDefinition = $workerDefinition
         };
 
-        $runspaceJobs += $runspaceJob;
+        $runspaceJobs.Add($counter, $runspaceJob);
       }
         
       $counter++;
-
       Write-Progress -Activity 'Creating workers...' -Status "Current entry: $counter" -PercentComplete (($counter / $inputCsv.Count) * 100);
     }
 
     $completedCount = 0;
     do
     {
-      foreach ($runspaceJob in $runspaceJobs)
+      $keysToRemove = @();
+      foreach ($key in $runspaceJobs.Keys)
       {
+        $runspaceJob = $runspaceJobs[$key];
         if ($null -ne $runspaceJob.InvokedWorker)
         {
           if ($runspaceJob.InvokedWorker.IsCompleted)
@@ -500,28 +504,66 @@ namespace Auth
               # If background contains error it will throw here. We catch
               # that and log the error.
               $runspaceJob.WorkerDefinition.EndInvoke($runspaceJob.InvokedWorker);
-              $runspaceJob.WorkerDefinition.Dispose();
-              $runspaceJob.WorkerDefinition = $null;
-              $runspaceJob.InvokedWorker = $null;
+              if ($runspaceJob.WorkerDefinition.Streams.Error.Count -gt 0)
+              {
+                throw $runspaceJob.WorkerDefinition.Streams.Error[0].Exception.Message;
+              }
             }
             catch
             {
               # log
               Write-Host $_.Exception.Message;
             }
+            finally
+            {            
+              $runspaceJob.WorkerDefinition.Dispose();
+              $runspaceJob.WorkerDefinition = $null;
+              $runspaceJob.InvokedWorker = $null;
+            }
             
+            $keysToRemove += $key;
             $completedCount++;
             Write-Progress -Activity "Retrieving workers..." -Status "Completed count: $completedCount" -PercentComplete (($completedCount / $inputCsv.Count) * 100);
           }
         }
       }
+      
+      # perform cleanup of finished jobs.
+      if ($keysToRemove.Count -gt 0)
+      {
+        foreach ($keyToRemove in $keysToRemove)
+        {
+          [void]$runspaceJobs.Remove($keyToRemove);
+        }
+      }
 
       Start-Sleep -Milliseconds 500;
+
+      # Caller can stop on 'Ctrl + S'
+      # https://docs.microsoft.com/en-us/dotnet/api/system.management.automation.host.pshostrawuserinterface.readkey?redirectedfrom=MSDN&view=powershellsdk-1.1.0#System_Management_Automation_Host_PSHostRawUserInterface_ReadKey_System_Management_Automation_Host_ReadKeyOptions_
+      if ($Host.ui.RawUI.KeyAvailable)
+      {
+        $key = $Host.UI.RawUI.ReadKey("IncludeKeyUp,NoEcho");
+        if ($key.ControlKeyState -eq 'LeftCtrlPressed' -and $key.VirtualKeyCode -eq '83') # Ctrl + S
+        {
+          Write-Warning -Message "'Ctrl + S' detected. Stopping..."
+          foreach ($key in $runspaceJobs.Keys)
+          {
+            $runspaceJob = $runspaceJobs[$key];
+            if ($null -ne $runspaceJob.WorkerDefinition)
+            {
+              $runspaceJob.WorkerDefinition.Stop();
+              $runspaceJob.WorkerDefinition.Dispose();
+            }
+          }
+        } 
+      }
+
     } while ($completedCount -lt $inputCsv.Count)
   }
 
   End
   {
-      
+    [void]$runspacePool.Close();
   }
 }

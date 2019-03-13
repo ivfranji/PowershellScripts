@@ -502,7 +502,23 @@ namespace Auth
               $runspaceJob.WorkerDefinition.EndInvoke($runspaceJob.InvokedWorker);
               if ($runspaceJob.WorkerDefinition.Streams.Error.Count -gt 0)
               {
-                throw $runspaceJob.WorkerDefinition.Streams.Error[0].Exception.Message;
+                $sb = New-Object -TypeName System.Text.StringBuilder;
+
+                foreach ($runspaceError in $runspaceJob.WorkerDefinition.Streams.Error)
+                {
+                  $exception = $runspaceError.Exception;
+                  do
+                  {
+                    $sb.AppendLine($exception.Message);
+                    $sb.AppendLine("===== Stack trace =====");
+                    $sb.AppendLine($exception.StackTrace);
+                    $sb.AppendLine("=======================");
+                    $exception = $exception.InnerException;
+                  }
+                  while ($null -ne $exception)
+                }
+                
+                throw $sb.ToString();
               }
             }
             catch
